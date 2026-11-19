@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      9.0
-// @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；仅在console调试页面生效
+// @version      9.1
+// @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；v9.1 停止抓包同步「退出全部连接」、面板环境与平台环境下拉双向同步、仓库更名；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
 // @match        *://*.maitian-yun.com/bus/logUpdate/platformLog
 // @match        *://*.linkdiag-eu.foxess.cloud/*
-// @homepageURL  https://github.com/y2979558-debug/foxess-heatpump-userscript
-// @updateURL    https://raw.githubusercontent.com/y2979558-debug/foxess-heatpump-userscript/main/foxess-heatpump.user.js
-// @downloadURL  https://raw.githubusercontent.com/y2979558-debug/foxess-heatpump-userscript/main/foxess-heatpump.user.js
+// @homepageURL  https://github.com/y2979558-debug/hp-us-8f3a91
+// @updateURL    https://raw.githubusercontent.com/y2979558-debug/hp-us-8f3a91/main/foxess-heatpump.user.js
+// @downloadURL  https://raw.githubusercontent.com/y2979558-debug/hp-us-8f3a91/main/foxess-heatpump.user.js
 // @grant        none
 // @run-at       document-start
 // @all-frames   true
@@ -3999,7 +3999,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.0</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.1</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4465,42 +4465,55 @@ async function platOpenSnBox(){
   if(writer){writer.click();for(let i=0;i<12;i++){await platSleep(150);box=document.querySelector(PLAT_SN_SEL);if(box&&platVisible(box))return box;}return box||null;}
   return box||null;
 }
-async function platApplyEnv(env){
-  if(env==='auto')return {ok:true,note:''};
-  const match=env==='eu'?(t)=>/欧|EU|Europe|德国|英国|法国|意大利|荷兰/.test(t):(t)=>/上海|测试|CN|China/.test(t);
-  // 原生 select
-  const nativeSel=[...document.querySelectorAll('select')].find(s=>{
-    if(platPanelEl(s))return false;
-    return [...s.options].some(o=>/上海|欧服|欧洲|测试|EU/i.test(o.textContent));
-  });
-  if(nativeSel){
-    const opt=[...nativeSel.options].find(o=>match(o.textContent.trim()));
-    if(!opt)return {ok:false,note:'环境中没有匹配项'};
-    if(nativeSel.value===opt.value)return {ok:true,note:'环境已是目标值'};
-    nativeSel.value=opt.value;
-    nativeSel.dispatchEvent(new Event('change',{bubbles:true}));
-    await platSleep(1200);
-    return {ok:true,note:'已切换原生环境下拉'};
-  }
-  // 自绘下拉：点开当前值，再点候选项
-  const names=/^(上海测试|上海|欧服|欧洲|测试服|测试|正式|生产|预发|EU|Europe)$/i;
-  const triggers=[...document.querySelectorAll('div,span,button')].filter(el=>{
+const PLAT_ENV_NAME={eu:'欧服',test:'上海测试'};
+function platNorm(s){return (s||'').replace(/\s+/g,'').trim();}
+function platFindEnvTrigger(){
+  const wanted=['上海测试','欧服'];
+  // 常见 UI 库的选择器
+  const libs=[...document.querySelectorAll('[role="combobox"],.el-select,.ant-select,.arco-select,.n-select,.semi-select')].filter(el=>!platPanelEl(el));
+  for(const el of libs){const t=platNorm(el.textContent);if(wanted.some(w=>t.includes(w)))return el;}
+  // 文本匹配：选可见且最宽的（下拉框本体）
+  const cands=[...document.querySelectorAll('div,span,button')].filter(el=>{
     if(platPanelEl(el))return false;
-    const t=(el.textContent||'').trim();
-    return names.test(t)&&el.children.length<=1;
-  });
-  const trigger=triggers[triggers.length-1];
-  if(!trigger)return {ok:false,note:'未识别环境控件'};
-  const current=(trigger.textContent||'').trim();
-  if(match(current))return {ok:true,note:'环境已是目标值'};
+    const t=platNorm(el.textContent);
+    return wanted.includes(t)&&(!el.children.length||el.children.length===1);
+  }).filter(platVisible);
+  cands.sort((a,b)=>b.getBoundingClientRect().width-a.getBoundingClientRect().width);
+  return cands[0]||null;
+}
+async function platApplyEnv(env){
+  if(env==='auto')return {ok:true,note:'跟随页面'};
+  const want=PLAT_ENV_NAME[env];
+  if(!want)return {ok:true,note:'保持当前环境'};
+  let trigger=platFindEnvTrigger();
+  if(!trigger)return {ok:false,note:'未识别平台环境控件'};
+  if(platNorm(trigger.textContent).includes(want))return {ok:true,note:'环境已是'+want};
   trigger.click();
-  await platSleep(500);
-  const opts=[...document.querySelectorAll('[role="option"],li,.el-select-dropdown__item,.ant-select-item,.n-option,.arco-select-option')]
-    .filter(el=>platVisible(el)&&match((el.textContent||'').trim()));
-  if(!opts.length)return {ok:false,note:'环境候选项未找到'};
-  opts[0].click();
-  await platSleep(1200);
-  return {ok:true,note:'已切换自绘环境下拉'};
+  await platSleep(450);
+  const opts=[...document.querySelectorAll('[role="option"],li,div,span')].filter(el=>{
+    if(platPanelEl(el)||!platVisible(el))return false;
+    return platNorm(el.textContent)===want;
+  });
+  const opt=opts.filter(el=>!opts.some(o=>o!==el&&el.contains(o)))[0];
+  if(!opt)return {ok:false,note:'未找到「'+want+'」选项'};
+  opt.click();
+  await platSleep(1300);
+  trigger=platFindEnvTrigger();
+  if(trigger&&platNorm(trigger.textContent).includes(want))return {ok:true,note:'已切换到'+want};
+  return {ok:false,note:'已点击「'+want+'」，但未确认切换成功'};
+}
+async function platDisconnect(){
+  const btn=[...document.querySelectorAll('button')].find(b=>!platPanelEl(b)&&!b.disabled&&platVisible(b)&&/^(退出全部连接|断开全部连接|全部断开|停止全部连接)$/.test(platNorm(b.textContent)));
+  if(!btn)return {ok:false,note:'未找到「退出全部连接」按钮'};
+  btn.click();
+  await platSleep(600);
+  const dlg=[...document.querySelectorAll('[role="dialog"],.el-dialog,.ant-modal,.arco-modal,.modal')].find(platVisible);
+  if(dlg){
+    const ok=[...dlg.querySelectorAll('button')].find(b=>!b.disabled&&/^(确定|确认|是)$/.test(platNorm(b.textContent)));
+    if(ok){ok.click();await platSleep(400);}
+  }
+  await platSleep(800);
+  return {ok:true,note:'已退出全部连接'};
 }
 async function platConnect(sn,env){
   const list=sn.split(/[\s,;，；]+/).map(s=>s.trim()).filter(Boolean);
@@ -4541,7 +4554,13 @@ async function toggleCapture(){
     const btn=document.getElementById('fox-btn-cap');
     const status=document.getElementById('fox-cap-status');
     btn.textContent='开启抓包';btn.style.background='#1a73e8';status.style.background='#ccc';
-    platStatus('已停止抓包');
+    platStatus('已停止抓包，正在退出平台连接…');
+    try{
+      const r=await platDisconnect();
+      platStatus(r.ok?'✅ '+r.note:'⚠ '+r.note+'（已仅停止抓包）');
+    }catch(e){
+      platStatus('⚠ 退出连接异常：'+(e&&e.message||e)+'（已仅停止抓包）');
+    }
     return;
   }
   const btn=document.getElementById('fox-btn-cap');
