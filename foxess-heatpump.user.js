@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      8.9
-// @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；仅在console调试页面生效
+// @version      9.0
+// @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
 // @match        *://*.maitian-yun.com/bus/logUpdate/platformLog
@@ -3999,7 +3999,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v8.9</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.0</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4009,14 +4009,15 @@ function createUI(){
         <option value="Y907">Y907 热泵</option><option value="X7">X7 ZAD106</option>
       </select>
       <input id="fox-sn-input" placeholder="过滤SN..." title="过滤后只接收含匹配 SN 的报文" style="flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:12px;width:140px;">
-      <select id="fox-env-select" style="padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;white-space:nowrap;">
-        <option value="eu">欧服</option><option value="test">测试服</option>
+      <select id="fox-env-select" title="服务器环境：选「跟随页面」则不改平台环境" style="padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;white-space:nowrap;">
+        <option value="auto">跟随页面</option><option value="eu">欧服</option><option value="test">上海测试</option>
       </select>
     </div>
     <div style="display:flex;gap:6px;">
       <button id="fox-btn-cap" style="flex:1;padding:5px;border:none;border-radius:4px;background:#1a73e8;color:#fff;cursor:pointer;font-size:12px;">开启抓包</button>
       <button id="fox-btn-open" style="flex:1;padding:5px;border:none;border-radius:4px;background:#34a853;color:#fff;cursor:pointer;font-size:12px;">📊 解析面板</button>
     </div>
+    <div id="fox-conn-status" style="font-size:10px;color:#888;line-height:1.4;min-height:14px;"></div>
     <div style="display:flex;gap:6px;">
       <button id="fox-btn-manual" style="flex:1;padding:5px;border:none;border-radius:4px;background:#f59e0b;color:#fff;cursor:pointer;font-size:12px;">✋ 手动粘贴解析</button>
       <button id="fox-btn-clear" style="flex:1;padding:5px;border:none;border-radius:4px;background:#6c757d;color:#fff;cursor:pointer;font-size:12px;">清空</button>
@@ -4247,6 +4248,15 @@ function createUI(){
     const next=e.target.value.trim();if(next===snFilter)return;snFilter=next;
     latestData={};activeDashboardSN='';lastDashboardTime=null;curveBuf=[];updateUI();renderDashboard();drawCurve();
   };
+  // 恢复上次使用的 SN 与环境
+  try{
+    const lastSn=localStorage.getItem('foxLastSn');
+    const snEl=document.getElementById('fox-sn-input');
+    if(lastSn&&snEl&&!snEl.value){snEl.value=lastSn;snFilter=lastSn;}
+    const lastEnv=localStorage.getItem('foxLastEnv');
+    const envEl=document.getElementById('fox-env-select');
+    if(lastEnv&&envEl&&[...envEl.options].some(o=>o.value===lastEnv))envEl.value=lastEnv;
+  }catch(err){}
   document.getElementById('fox-btn-pause').onclick=(e)=>{paused=!paused;e.target.textContent=paused?'▶ 继续':'⏸ 暂停';};
   document.getElementById('fox-btn-clear').onclick=()=>{capturedFrames.length=0;latestData={};activeDashboardSN='';lastDashboardTime=null;debugStats={rawMsg:0,hexFound:0,framesFound:0,parseFail:0};byteBuffer=[];rawMsgLog=[];curveBuf=[];updateUI();renderDashboard();drawCurve();};
   document.getElementById('fox-btn-manual').onclick=()=>{
@@ -4425,14 +4435,136 @@ function createUI(){
   document.addEventListener('mousemove',(e)=>{if(drag){drag.el.style.left=(e.clientX-drag.x)+'px';drag.el.style.top=(e.clientY-drag.y)+'px';drag.el.style.right='auto';}});
   document.addEventListener('mouseup',()=>{drag=null;});
 }
-function toggleCapture(){
-  capturing=!capturing;
+// ===== 设备连接检测平台：一键写入 SN 并连接 =====
+const PLAT_SN_SEL='[aria-label="设备 SN 列表"],textarea[placeholder*="最多 100 个 SN"]';
+const platSleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+function platStatus(msg){const e=document.getElementById('fox-conn-status');if(e)e.textContent=msg;}
+function platVisible(el){if(!el)return false;const r=el.getBoundingClientRect();const s=getComputedStyle(el);return !!(r.width||r.height)&&s.display!=='none'&&s.visibility!=='hidden';}
+function platSetValue(el,val){
+  const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+  const setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+  setter.call(el,val);
+  el.dispatchEvent(new Event('input',{bubbles:true}));
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+}
+function platPanelEl(el){return !!(el&&el.closest&&el.closest('#fox-mini,#fox-panel'));}
+function platButton(re){
+  return [...document.querySelectorAll('button')].find(b=>!b.disabled&&!platPanelEl(b)&&re.test(b.textContent.replace(/\s+/g,'')))||null;
+}
+function platAllButtons(re){
+  return [...document.querySelectorAll('button')].filter(b=>!platPanelEl(b)&&re.test(b.textContent.replace(/\s+/g,'')));
+}
+function platConnectedText(){
+  const t=document.body.innerText||'';
+  return /全部已连接并监听/.test(t);
+}
+async function platOpenSnBox(){
+  let box=document.querySelector(PLAT_SN_SEL);
+  if(box&&platVisible(box))return box;
+  const writer=platButton(/^SN编写$/);
+  if(writer){writer.click();for(let i=0;i<12;i++){await platSleep(150);box=document.querySelector(PLAT_SN_SEL);if(box&&platVisible(box))return box;}return box||null;}
+  return box||null;
+}
+async function platApplyEnv(env){
+  if(env==='auto')return {ok:true,note:''};
+  const match=env==='eu'?(t)=>/欧|EU|Europe|德国|英国|法国|意大利|荷兰/.test(t):(t)=>/上海|测试|CN|China/.test(t);
+  // 原生 select
+  const nativeSel=[...document.querySelectorAll('select')].find(s=>{
+    if(platPanelEl(s))return false;
+    return [...s.options].some(o=>/上海|欧服|欧洲|测试|EU/i.test(o.textContent));
+  });
+  if(nativeSel){
+    const opt=[...nativeSel.options].find(o=>match(o.textContent.trim()));
+    if(!opt)return {ok:false,note:'环境中没有匹配项'};
+    if(nativeSel.value===opt.value)return {ok:true,note:'环境已是目标值'};
+    nativeSel.value=opt.value;
+    nativeSel.dispatchEvent(new Event('change',{bubbles:true}));
+    await platSleep(1200);
+    return {ok:true,note:'已切换原生环境下拉'};
+  }
+  // 自绘下拉：点开当前值，再点候选项
+  const names=/^(上海测试|上海|欧服|欧洲|测试服|测试|正式|生产|预发|EU|Europe)$/i;
+  const triggers=[...document.querySelectorAll('div,span,button')].filter(el=>{
+    if(platPanelEl(el))return false;
+    const t=(el.textContent||'').trim();
+    return names.test(t)&&el.children.length<=1;
+  });
+  const trigger=triggers[triggers.length-1];
+  if(!trigger)return {ok:false,note:'未识别环境控件'};
+  const current=(trigger.textContent||'').trim();
+  if(match(current))return {ok:true,note:'环境已是目标值'};
+  trigger.click();
+  await platSleep(500);
+  const opts=[...document.querySelectorAll('[role="option"],li,.el-select-dropdown__item,.ant-select-item,.n-option,.arco-select-option')]
+    .filter(el=>platVisible(el)&&match((el.textContent||'').trim()));
+  if(!opts.length)return {ok:false,note:'环境候选项未找到'};
+  opts[0].click();
+  await platSleep(1200);
+  return {ok:true,note:'已切换自绘环境下拉'};
+}
+async function platConnect(sn,env){
+  const list=sn.split(/[\s,;，；]+/).map(s=>s.trim()).filter(Boolean);
+  if(!list.length)return {ok:false,note:'SN 为空'};
+  if(platConnectedText()&&!platButton(/启动批量连接/))return {ok:true,note:'平台已连接'};
+  const envRes=await platApplyEnv(env);
+  if(!envRes.ok)platStatus('环境切换失败：'+envRes.note+'（继续使用当前环境）');
+  let box=await platOpenSnBox();
+  if(!box)return {ok:false,note:'未找到 SN 列表输入框，也未找到「SN 编写」按钮'};
+  platSetValue(box,list.join('\n'));
+  await platSleep(300);
+  // SN 编写若为弹窗，需要确认（只在输入框所在容器内找按钮，避免误点页面其他按钮）
+  let conn=platButton(/启动批量连接/);
+  if(!conn||conn.disabled){
+    let scope=box;
+    for(let i=0;i<4&&scope.parentElement;i++){
+      scope=scope.parentElement;
+      const confirm=[...scope.querySelectorAll('button')].find(b=>!b.disabled&&platVisible(b)&&/^(确定|保存|应用|确认|完成)$/.test(b.textContent.replace(/\s+/g,'')));
+      if(confirm){confirm.click();await platSleep(400);break;}
+    }
+  }
+  conn=platButton(/启动批量连接/);
+  if(!conn){
+    if(platConnectedText())return {ok:true,note:'平台已连接'};
+    return {ok:false,note:'「启动批量连接」按钮不可用（可能仍在连接中，或 SN 未被接受）'};
+  }
+  conn.click();
+  for(let i=0;i<20;i++){
+    await platSleep(500);
+    if(platConnectedText())return {ok:true,note:'设备已连接并监听'};
+    if(i===6)platStatus('正在连接设备…（'+list.join(',')+'）');
+  }
+  return {ok:true,note:'已发起连接，等待设备上线'};
+}
+async function toggleCapture(){
+  if(capturing){
+    capturing=false;
+    const btn=document.getElementById('fox-btn-cap');
+    const status=document.getElementById('fox-cap-status');
+    btn.textContent='开启抓包';btn.style.background='#1a73e8';status.style.background='#ccc';
+    platStatus('已停止抓包');
+    return;
+  }
   const btn=document.getElementById('fox-btn-cap');
   const status=document.getElementById('fox-cap-status');
-  btn.textContent=capturing?'停止抓包':'开启抓包';
-  btn.style.background=capturing?'#ea4335':'#1a73e8';
-  status.style.background=capturing?'#34a853':'#ccc';
-  if(capturing)byteBuffer=[];
+  capturing=true;byteBuffer=[];
+  btn.textContent='停止抓包';btn.style.background='#ea4335';status.style.background='#34a853';
+  const snInput=document.getElementById('fox-sn-input');
+  const sn=(snInput&&snInput.value||'').trim();
+  if(!sn){platStatus('已开始抓包（未填 SN，仅监听现有连接）');return;}
+  try{localStorage.setItem('foxLastSn',sn);}catch(e){}
+  const envSel=document.getElementById('fox-env-select');
+  const env=envSel?envSel.value:'auto';
+  try{localStorage.setItem('foxLastEnv',env);}catch(e){}
+  platStatus('正在写入 SN 并连接…');
+  try{
+    btn.disabled=true;
+    const res=await platConnect(sn,env);
+    platStatus(res.ok?'✅ '+res.note+'，已开始抓包':'⚠ '+res.note+'；仍继续抓包');
+  }catch(e){
+    platStatus('⚠ 自动连接异常：'+(e&&e.message||e)+'；仍继续抓包');
+  }finally{
+    btn.disabled=false;
+  }
 }
 function updateUI(){
   const matching=capturedFrames.filter(frameMatchesSn);
