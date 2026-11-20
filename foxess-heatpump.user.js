@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      9.2
+// @version      9.2.1
 // @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；v9.1 停止抓包同步「退出全部连接」、面板环境与平台环境下拉双向同步、仓库更名；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
@@ -2483,7 +2483,9 @@ let capturing=false;
 let snFilter='';
 function frameMatchesSn(frame){
   if(!snFilter)return true;
-  return (frame.parsed||[]).some(p=>p.name&&p.name.toUpperCase().includes('SN')&&String(p.value??'').toUpperCase().includes(snFilter.toUpperCase()));
+  const filter=snFilter.toUpperCase();
+  if(String(frame.connectionSn??'').toUpperCase().includes(filter))return true;
+  return (frame.parsed||[]).some(p=>p.name&&p.name.toUpperCase().includes('SN')&&String(p.value??'').toUpperCase().includes(filter));
 }
 let debugStats={rawMsg:0,hexFound:0,framesFound:0,parseFail:0};
 let rawMsgLog=[];
@@ -2592,6 +2594,7 @@ if(typeof EventSource!=='undefined'){
   };
 }
 // 轻量WS实例跟踪：hook send方法，在首次send时给实例补挂独立message监听器
+const consoleSocketSns=new WeakMap();
 const origWSSend=WebSocket.prototype.send;
 WebSocket.prototype.send=function(data){
   try{
@@ -2603,7 +2606,20 @@ WebSocket.prototype.send=function(data){
       origAdd.call(this,'message',function(ev){try{if(capturing){fwObserve(ev.data,this._foxWaveId,'incoming');handleWsMessage(ev.data,ev);}}catch(e){}});
     }
   }catch(e){}
-  return origWSSend.apply(this,arguments);
+  const result=origWSSend.apply(this,arguments);
+  // 同一个 Console 会话的回包可能携带机组 SN，按 listen 指令记录所属连接 SN。
+  if(typeof data==='string'&&data.includes('"listen"')){
+    try{
+      if(new URL(this.url).pathname==='/hub/v0/websocket/console'){
+        const request=JSON.parse(data);
+        if(request.cmd==='listen'&&request.resource==='console'&&typeof request.parameters?.sn==='string'){
+          const connectionSn=request.parameters.sn.trim();
+          if(connectionSn)consoleSocketSns.set(this,connectionSn);
+        }
+      }
+    }catch(e){}
+  }
+  return result;
 };
 function handleHttpData(data,source){
   if(!capturing)return;
@@ -2681,6 +2697,7 @@ function handleWsMessage(data,event){
   queueCaptureRefresh();
   if(!hexList.length)return;
   debugStats.hexFound+=hexList.length;
+  const connectionSn=consoleSocketSns.get(event?.currentTarget);
   for(const hexStr of hexList){
     try{
       const bytes=hexToBytes(hexStr);
@@ -2689,8 +2706,8 @@ function handleWsMessage(data,event){
       for(const fb of frames){
         const parsed=parseFrame(fb);
         if(!parsed){debugStats.parseFail++;continue;}
-        if(!frameMatchesSn(parsed))continue;
-        const frameData={time:new Date().toISOString(),...parsed};
+        const frameData={time:new Date().toISOString(),...parsed,connectionSn};
+        if(!frameMatchesSn(frameData))continue;
         if(window.top!==window){
           try{window.parent.postMessage({foxessFrame:true,data:frameData},'*');}catch(e){}
         }else{
@@ -4029,7 +4046,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.2</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.2.1</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4038,7 +4055,7 @@ function createUI(){
       <select id="fox-proto-select" style="padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;white-space:nowrap;">
         <option value="Y907">Y907 热泵</option><option value="X7">X7 ZAD106</option>
       </select>
-      <input id="fox-sn-input" placeholder="过滤SN..." title="过滤后只接收含匹配 SN 的报文" style="flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:12px;width:140px;">
+      <input id="fox-sn-input" placeholder="连接 / 过滤 SN" title="匹配 Console 连接 SN 或报文中的 SN" style="flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:12px;width:140px;">
       <select id="fox-env-select" title="服务器环境：选「跟随页面」则不改平台环境" style="padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;white-space:nowrap;">
         <option value="auto">跟随页面</option><option value="eu">欧服</option><option value="test">上海测试</option>
       </select>
