@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      9.1
+// @version      9.2
 // @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；v9.1 停止抓包同步「退出全部连接」、面板环境与平台环境下拉双向同步、仓库更名；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
@@ -2493,6 +2493,39 @@ let panelOpen=false;
 let latestData={};
 let activeDashboardSN='';
 let lastDashboardTime=null;
+const captureRefreshInterval=150;
+let captureRefreshTimer=null;
+let captureListDirty=false;
+let captureDashboardDirty=false;
+let lastCaptureFrameId=0;
+
+// 报文逐帧入库，集中刷新列表和实时视图。
+function queueCaptureRefresh(){
+  if(window.top===window&&captureRefreshTimer===null){
+    captureRefreshTimer=setTimeout(flushCaptureUI,captureRefreshInterval);
+  }
+}
+function flushCaptureUI(force=false){
+  clearTimeout(captureRefreshTimer);
+  captureRefreshTimer=null;
+  const refreshList=force||captureListDirty;
+  const refreshDashboard=force||captureDashboardDirty;
+  captureListDirty=false;
+  captureDashboardDirty=false;
+  updateUI(refreshList);
+  if(!refreshDashboard||!panelOpen||paused)return;
+  if(viewMode==='dashboard')renderDashboard();
+  if(viewMode==='curve')drawCurve();
+}
+function addCapturedFrame(frame){
+  frame.listId=++lastCaptureFrameId;
+  capturedFrames.push(frame);
+  if(capturedFrames.length>500)capturedFrames.shift();
+  captureListDirty=true;
+  if(frame.parsed&&updateDashboard(frame))captureDashboardDirty=true;
+  queueCaptureRefresh();
+}
+
 const origAdd=WebSocket.prototype.addEventListener;
 const origRemove=WebSocket.prototype.removeEventListener;
 Object.defineProperty(WebSocket.prototype,'onmessage',{
@@ -2523,22 +2556,24 @@ WebSocket.prototype.removeEventListener=function(type,listener,opts){
   return origRemove.call(this,type,listener,opts);
 };
 // Hook XMLHttpRequest - 捕获HTTP响应中的hex报文（42实时信息可能走HTTP轮询）
-const origXHROpen=XMLHttpRequest.prototype.open;
 const origXHRSend=XMLHttpRequest.prototype.send;
-XMLHttpRequest.prototype.open=function(method,url){this._foxUrl=url;return origXHROpen.apply(this,arguments);};
+function handleXhrLoad(){
+  if(!capturing)return;
+  try{
+    const text=this.responseText;
+    if(text&&text.length>10)handleHttpData(text,'XHR');
+  }catch(e){}
+}
 XMLHttpRequest.prototype.send=function(){
-  const self=this;
-  this.addEventListener('load',function(){
-    try{if(self.responseText&&self.responseText.length>10)handleHttpData(self.responseText,'XHR');}catch(e){}
-  });
+  this.addEventListener('load',handleXhrLoad);
   return origXHRSend.apply(this,arguments);
 };
 // Hook fetch
 const origFetch=window.fetch;
 if(origFetch){
   window.fetch=function(){
-    const url=arguments[0];
     return origFetch.apply(this,arguments).then(function(resp){
+      if(!capturing)return resp;
       try{const c=resp.clone();c.text().then(function(t){if(t&&t.length>10)handleHttpData(t,'fetch');}).catch(function(){});}catch(e){}
       return resp;
     });
@@ -2580,6 +2615,7 @@ function handleHttpData(data,source){
   debugStats.hexFound+=hexList.length;
   rawMsgLog.unshift({time:new Date().toLocaleTimeString(),preview:'['+source+'] '+data.substring(0,100),hexCount:hexList.length});
   if(rawMsgLog.length>8)rawMsgLog.pop();
+  queueCaptureRefresh();
   for(const hexStr of hexList){
     const bytes=hexToBytes(hexStr);
     const frames=processBytes(bytes);
@@ -2592,9 +2628,7 @@ function handleHttpData(data,source){
       if(window.top!==window){
         try{window.parent.postMessage({foxessFrame:true,data:frameData},'*');}catch(e){}
       }else{
-        capturedFrames.push(frameData);
-        if(capturedFrames.length>500)capturedFrames.shift();
-        updateUI();updateDashboard(parsed);
+        addCapturedFrame(frameData);
       }
     }
   }
@@ -2644,6 +2678,7 @@ function handleWsMessage(data,event){
   const hexLen=hexList.length?hexList.reduce((s,h)=>s+h.length,0):0;
   rawMsgLog.unshift({time:new Date().toLocaleTimeString(),preview:rawPreview.substring(0,150)+' [hexLen='+hexLen+']',hexCount:hexList.length});
   if(rawMsgLog.length>10)rawMsgLog.pop();
+  queueCaptureRefresh();
   if(!hexList.length)return;
   debugStats.hexFound+=hexList.length;
   for(const hexStr of hexList){
@@ -2659,9 +2694,7 @@ function handleWsMessage(data,event){
         if(window.top!==window){
           try{window.parent.postMessage({foxessFrame:true,data:frameData},'*');}catch(e){}
         }else{
-          capturedFrames.push(frameData);
-          if(capturedFrames.length>500)capturedFrames.shift();
-          updateUI();updateDashboard(parsed);
+          addCapturedFrame(frameData);
         }
       }
     }catch(e){}
@@ -3985,13 +4018,10 @@ function createUI(){
         const fd=ev.data.data;
         if(fd.time&&!(fd.time instanceof Date))fd.time=new Date(fd.time);
         if(!frameMatchesSn(fd))return;
-        capturedFrames.push(fd);
-        if(capturedFrames.length>500)capturedFrames.shift();
-        updateUI();
-        if(fd.parsed)updateDashboard({cmd:fd.cmd,parsed:fd.parsed,crcOk:fd.crcOk});
         // 同步rawMsgLog
         rawMsgLog.unshift({time:new Date().toLocaleTimeString(),preview:'[iframe] cmd=0x'+fd.cmd+' len='+fd.dataLen,hexCount:1});
         if(rawMsgLog.length>10)rawMsgLog.pop();
+        addCapturedFrame(fd);
       }
     }catch(e){}
   });
@@ -3999,7 +4029,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.1</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.2</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4208,7 +4238,11 @@ function createUI(){
     updateUI();renderDashboard();renderCurveView(true);
   };
   document.getElementById('fox-btn-cap').onclick=toggleCapture;
-  document.getElementById('fox-btn-open').onclick=()=>{panel.style.display='flex';panelOpen=true;updateUI();if(viewMode==='curve')drawCurve();if(viewMode==='file')drawFileCurve();};
+  document.getElementById('fox-btn-open').onclick=()=>{
+    panel.style.display='flex';panelOpen=true;
+    flushCaptureUI(true);
+    if(viewMode==='file')drawFileCurve();
+  };
   document.getElementById('fox-panel-close').onclick=()=>{panel.style.display='none';panelOpen=false;};
   let panelBeforeFull=null;
   const sizeBtn=document.getElementById('fox-panel-size');
@@ -4257,7 +4291,10 @@ function createUI(){
     const envEl=document.getElementById('fox-env-select');
     if(lastEnv&&envEl&&[...envEl.options].some(o=>o.value===lastEnv))envEl.value=lastEnv;
   }catch(err){}
-  document.getElementById('fox-btn-pause').onclick=(e)=>{paused=!paused;e.target.textContent=paused?'▶ 继续':'⏸ 暂停';};
+  document.getElementById('fox-btn-pause').onclick=(e)=>{
+    paused=!paused;e.target.textContent=paused?'▶ 继续':'⏸ 暂停';
+    if(!paused)flushCaptureUI(true);
+  };
   document.getElementById('fox-btn-clear').onclick=()=>{capturedFrames.length=0;latestData={};activeDashboardSN='';lastDashboardTime=null;debugStats={rawMsg:0,hexFound:0,framesFound:0,parseFail:0};byteBuffer=[];rawMsgLog=[];curveBuf=[];updateUI();renderDashboard();drawCurve();};
   document.getElementById('fox-btn-manual').onclick=()=>{
     try{
@@ -4273,11 +4310,9 @@ function createUI(){
       const parsed=parseFrame(fb);
       if(!parsed){fail++;continue;}
       if(!frameMatchesSn(parsed))continue;
-      capturedFrames.push({time:new Date(),...parsed});
-      if(capturedFrames.length>500)capturedFrames.shift();
-      updateDashboard(parsed);ok++;
+      addCapturedFrame({time:new Date(),...parsed});ok++;
     }
-    updateUI();
+    flushCaptureUI();
     let debugInfo='';
     if(frames.length===0){
       const hasHead=bytes.length>=2&&bytes[0]===0x7F&&bytes[1]===0x7F;
@@ -4304,8 +4339,9 @@ function createUI(){
       document.getElementById('fox-view-waveform').style.display=viewMode==='waveform'?'block':'none';
       document.getElementById('fox-view-settings').style.display=viewMode==='settings'?'block':'none';
       document.getElementById('fox-view-sn').style.display=viewMode==='sn'?'block':'none';
+      if(viewMode==='list')flushCaptureUI(true);
       if(viewMode==='dashboard')renderDashboard();
-      if(viewMode==='curve'){renderCurveView(false);drawCurve();}
+      if(viewMode==='curve')renderCurveView(false);
       if(viewMode==='file')drawFileCurve();
     };
   });
@@ -4585,11 +4621,7 @@ async function toggleCapture(){
     btn.disabled=false;
   }
 }
-function updateUI(){
-  const matching=capturedFrames.filter(frameMatchesSn);
-  document.getElementById('fox-count').textContent=matching.length;
-  document.getElementById('fox-crc-ok').textContent=matching.filter(f=>f.crcOk).length;
-  document.getElementById('fox-crc-err').textContent=matching.filter(f=>!f.crcOk).length;
+function updateUI(refreshFrames=true){
   const dm=document.getElementById('fox-dbg-msg');
   if(dm){dm.textContent=debugStats.rawMsg;
   document.getElementById('fox-dbg-hex').textContent=debugStats.hexFound;
@@ -4597,16 +4629,23 @@ function updateUI(){
   document.getElementById('fox-dbg-fail').textContent=debugStats.parseFail;
   const rl=document.getElementById('fox-raw-log');
   if(rl){rl.innerHTML=rawMsgLog.map(m=>`<div style="margin:2px 0;"><span style="color:#999;">[${escapeHtml(m.time)}]</span> <span style="color:${m.hexCount>0?'#34a853':'#ea4335'};">hex=${m.hexCount}</span> ${escapeHtml(m.preview.substring(0,120))}</div>`).join('');}}
+  if(!refreshFrames)return;
+  const matching=snFilter?capturedFrames.filter(frameMatchesSn):capturedFrames;
+  const validCount=matching.filter(f=>f.crcOk).length;
+  document.getElementById('fox-count').textContent=matching.length;
+  document.getElementById('fox-crc-ok').textContent=validCount;
+  document.getElementById('fox-crc-err').textContent=matching.length-validCount;
   if(!panelOpen||paused||viewMode!=='list')return;
   const list=document.getElementById('fox-frame-list');
-  const show=capturedFrames.map((frame,index)=>({frame,index})).filter(x=>frameMatchesSn(x.frame)).slice(-100).reverse();
-  // 重渲染前记录当前展开的详情（按数组下标 realIdx 记忆，新帧 push 后老下标不变）
-  const expandedIdx=new Set();
+  const show=matching.slice(-100).reverse();
+  // 缓存滚动时，按报文本身的 ID 恢复展开状态。
+  const expandedIds=new Set();
   list.querySelectorAll('div[id^="fox-detail-"]').forEach(d=>{
-    if(d.style.display==='block')expandedIdx.add(parseInt(d.id.replace('fox-detail-',''),10));
+    if(d.style.display==='block')expandedIds.add(d.id);
   });
   try{
-  list.innerHTML=show.map(({frame:f,index:realIdx})=>{
+  list.innerHTML=show.map(f=>{
+    const detailId='fox-detail-'+f.listId;
     const timeObj=f.time instanceof Date?f.time:new Date(f.time);
     const timeStr=isNaN(timeObj.getTime())?String(f.time):timeObj.toLocaleTimeString();
     const msStr=isNaN(timeObj.getTime())?'000':String(timeObj.getMilliseconds()).padStart(3,'0');
@@ -4619,14 +4658,14 @@ function updateUI(){
     const crcRecv=f.crcRecv!==undefined?f.crcRecv.toString(16).padStart(4,'0').toUpperCase():'????';
     const parsedRows=(f.parsed||[]).map(p=>`<tr><td style="padding:3px 8px;border-bottom:1px solid #f5f5f5;color:#333;">${escapeHtml(p.name)}</td><td style="padding:3px 8px;border-bottom:1px solid #f5f5f5;color:${p.name&&(p.name.includes('故障')||p.name.includes('错误列表'))&&p.value!=='无故障'&&String(p.value)!=='0'?'#ea4335':'#1a73e8'};font-weight:${p.name&&(p.name.includes('温度')||p.name.includes('压力')||p.name.includes('功率'))?'600':'400'};">${escapeHtml(p.value).replace(/\n/g,'<br>')}${p.unit?' '+escapeHtml(p.unit):''}</td><td style="padding:3px 8px;border-bottom:1px solid #f5f5f5;color:#999;font-family:monospace;font-size:11px;">${escapeHtml(p.hex)}</td></tr>`).join('');
     return `<div style="border:1px solid #e8e8e8;border-radius:8px;margin-bottom:8px;overflow:hidden;">
-      <div style="background:#f1f5f9;padding:8px 12px;display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap;" onclick="document.getElementById('fox-detail-${realIdx}').style.display=document.getElementById('fox-detail-${realIdx}').style.display==='none'?'block':'none'">
+      <div style="background:#f1f5f9;padding:8px 12px;display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap;" onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'block':'none'">
         <span style="color:#64748b;font-size:11px;">${timeStr}.${msStr}</span>
         <span style="background:${['42','02','05','4C','4D','5A'].indexOf(f.cmd)>=0?'#e8f5e9':['41','01','03'].indexOf(f.cmd)>=0?'#e3f2fd':'#fff3e0'};color:${['42','02','05','4C','4D','5A'].indexOf(f.cmd)>=0?'#2e7d32':['41','01','03'].indexOf(f.cmd)>=0?'#1565c0':'#e65100'};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;">0x${f.cmd} ${f.cmdName||''}</span>
         <span style="color:#1a73e8;font-weight:600;font-size:12px;">${escapeHtml(sn)}</span>
         <span style="margin-left:auto;font-size:11px;color:${f.crcOk?'#34a853':'#ea4335'};">CRC: ${f.crcOk?'✓':'✗'} (计算:${crcCalc} 接收:${crcRecv})</span>
         <span style="font-size:11px;color:#999;">数据${f.dataLen||0}B</span>
       </div>
-      <div id="fox-detail-${realIdx}" style="display:none;padding:10px 12px;">
+      <div id="${detailId}" style="display:${expandedIds.has(detailId)?'block':'none'};padding:10px 12px;">
         <div style="font-size:11px;color:#666;margin-bottom:6px;word-break:break-all;">HEX: ${rawHex}</div>
         <table style="width:100%;font-size:12px;border-collapse:collapse;">
           <thead><tr style="background:#f8f9fa;"><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;color:#666;">字段</th><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;color:#666;">值</th><th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;color:#666;">原始HEX</th></tr></thead>
@@ -4636,11 +4675,6 @@ function updateUI(){
       </div>
     </div>`;
   }).join('');
-  // 重渲染后恢复之前展开的详情
-  expandedIdx.forEach(ri=>{
-    const el=document.getElementById('fox-detail-'+ri);
-    if(el)el.style.display='block';
-  });
   }catch(e){list.innerHTML='<div style="color:#ea4335;padding:20px;text-align:center;">渲染出错: '+escapeHtml(e.message)+'<br>请截图反馈</div>';}
 }
 const DASHBOARD_GROUPS=[
@@ -4684,8 +4718,7 @@ function updateDashboard(parsed){
       if(curveBuf.length>curveMaxPoints)curveBuf.shift();
     }
   }
-  if(panelOpen&&viewMode==='dashboard'&&!paused)renderDashboard();
-  if(panelOpen&&viewMode==='curve'&&!paused)drawCurve();
+  return true;
 }
 function renderDashboard(){
   const container=document.getElementById('fox-dashboard-content');
@@ -4870,7 +4903,8 @@ function pickCurveParam(name){
 function chartHeightForPanel(canvas){
   const panel=document.getElementById('fox-panel');
   const height=Math.max(240,Math.min(1100,(panel&&panel.clientHeight?panel.clientHeight:680)-338));
-  canvas.style.height=height+'px';return height;
+  if(canvas.style.height!==height+'px')canvas.style.height=height+'px';
+  return height;
 }
 function chartColumns(buf,source,pins,hoverIndex){
   for(let i=pins.length-1;i>=0;i--)if(!source.includes(pins[i].sample))pins.splice(i,1);
@@ -4922,10 +4956,13 @@ function drawCurve(){
   const W=canvas.clientWidth||canvas.parentElement.clientWidth||800;
   const H=chartHeightForPanel(canvas);
   const dpr=window.devicePixelRatio||1;
-  canvas.width=Math.max(1,W*dpr);canvas.height=H*dpr;
+  const width=Math.max(1,Math.round(W*dpr)),height=Math.max(1,Math.round(H*dpr));
+  if(canvas.width!==width)canvas.width=width;
+  if(canvas.height!==height)canvas.height=height;
   const ctx=canvas.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,W,H);
+  ctx.lineWidth=1;
   ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
   const padL=CURVE_PAD_L,padR=CURVE_PAD_R,padT=CURVE_PAD_T,padB=CURVE_PAD_B;
   const plotW=W-padL-padR,plotH=H-padT-padB;
