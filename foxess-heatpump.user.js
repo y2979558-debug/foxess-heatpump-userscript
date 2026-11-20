@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      9.2.1
+// @version      9.3
 // @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；v9.1 停止抓包同步「退出全部连接」、面板环境与平台环境下拉双向同步、仓库更名；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
@@ -4046,7 +4046,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.2.1</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.3</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4694,9 +4694,14 @@ function updateUI(refreshFrames=true){
   }).join('');
   }catch(e){list.innerHTML='<div style="color:#ea4335;padding:20px;text-align:center;">渲染出错: '+escapeHtml(e.message)+'<br>请截图反馈</div>';}
 }
+// 40341 机组工作状态字，索引对应 Bit 0～12。
+const UNIT_WORK_STATUS_BITS=[
+  '电加热使能','防冻中','除霜使能','假期使能','绿电使能','市电使能','尖峰使能',
+  '杀菌使能','太阳能使能','日定时使能','周定时使能','压缩机运行','水泵运行'
+];
 const DASHBOARD_GROUPS=[
   {title:'🌡 温度监测',items:[['环境温度(TAO)'],['出水温度(TWO)'],['回水温度(TWI)'],['排气温度(TRD)'],['吸气温度(TRS)'],['蒸发温度(TE)'],['DHW测量温度'],['缓冲水箱温度']]},
-  {title:'⚡ 运行状态',items:[['直流压缩机频率'],['直流风扇转速'],['直流水泵流量'],['EXV1开度'],['EXV2开度'],['母线电压'],['压缩机相电流'],['工作模式'],['能量模式']]},
+  {title:'⚡ 运行状态',items:[['驱动器运行频率'],['直流风扇转速'],['直流水泵流量'],['EXV1开度'],['EXV2开度'],['母线电压'],['压缩机相电流'],['工作模式'],['机组运行状态'],['能量模式']]},
   {title:'🔌 开关状态',items:[['四通阀状态'],['高压开关状态'],['低压开关状态'],['流量开关状态'],['热水电加热使能'],['空调电加热'],['底盘加热带'],['驱动器开关状态']]},
   {title:'📊 能耗实时',items:[['系统实时功率'],['系统实时消耗功率'],['系统实时COP'],['制冷实时功率'],['制热实时功率'],['热水实时功率']]},
   {title:'💧 压力/水系统',items:[['低压压力'],['高压压力'],['排气压力'],['吸气压力'],['水流压力'],['Z1区域水泵'],['Z2区域水泵'],['Z3区域水泵']]}
@@ -4719,7 +4724,13 @@ function updateDashboard(parsed){
     if(sn&&activeDashboardSN&&sn!==activeDashboardSN){latestData={};curveBuf=[];}
     if(sn)activeDashboardSN=sn;
   }
-  for(const p of parsed.parsed){latestData[p.name]=p.value+(p.unit?' '+p.unit:'');}
+  for(const p of parsed.parsed){
+    latestData[p.name]=p.value+(p.unit?' '+p.unit:'');
+    if(p.name==='机组工作状态'){
+      const active=UNIT_WORK_STATUS_BITS.filter((_,bit)=>(p.raw&(1<<bit))!==0);
+      latestData['机组运行状态']=active.join(' · ')||'无已定义状态';
+    }
+  }
   lastDashboardTime=Date.now();
   // —— 实时曲线数据累积（Y907 0x42，缓存全部数值参数，与视图无关，从抓包第一帧开始）——
   if(parsed.cmd==='42'&&curveFields.length){
