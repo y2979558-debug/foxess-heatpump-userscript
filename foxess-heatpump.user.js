@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FoxESS 热泵报文解析工具
 // @namespace    http://tampermonkey.net/
-// @version      9.3
+// @version      9.4
 // @description  FoxESS云平台报文实时捕获、Y907(兼容Y906)/X7(ZAD106)双协议解析、故障码翻译、实时仪表盘、0x42参数实时曲线（缓存全部历史帧与视图无关，抓包即缓存+添加参数回填+Excel导出+参数搜索+悬停十字线与取值提示+空态统计，Y907新增热水功能设置状态+并机系统热能数据）；新增文档曲线视图（导入CSV生成曲线、英文列名自动翻译中文、搜索添加多参数、悬停取值、Excel导出）；v9.0 面板内填 SN + 选环境后点「开启抓包」自动写入平台 SN 列表并启动批量连接；v9.1 停止抓包同步「退出全部连接」、面板环境与平台环境下拉双向同步、仓库更名；仅在console调试页面生效
 // @match        *://*.foxesscloud.com/bus/logUpdate/platformLog
 // @match        *://*.foxesscloud.com.cn/bus/logUpdate/platformLog
@@ -4046,7 +4046,7 @@ function createUI(){
   mini.id='fox-mini';
   mini.style.cssText='position:fixed;top:80px;right:10px;z-index:9999;background:#fff;border:1px solid #e0e0e0;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.12);padding:10px 14px;font-family:Segoe UI,Microsoft YaHei,sans-serif;font-size:13px;user-select:none;';
   mini.innerHTML=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.3</span>
+    <span style="font-weight:600;color:#1a73e8;">FoxESS 报文工具 v9.4</span>
     <span id="fox-cap-status" style="width:8px;height:8px;border-radius:50%;background:#ccc;"></span>
     <span id="fox-mini-btn" style="margin-left:auto;cursor:pointer;color:#1a73e8;font-size:12px;padding:2px 8px;border:1px solid #1a73e8;border-radius:4px;background:#f0f7ff;">收起</span>
   </div>
@@ -4700,11 +4700,58 @@ const UNIT_WORK_STATUS_BITS=[
   '杀菌使能','太阳能使能','日定时使能','周定时使能','压缩机运行','水泵运行'
 ];
 const DASHBOARD_GROUPS=[
-  {title:'🌡 温度监测',items:[['环境温度(TAO)'],['出水温度(TWO)'],['回水温度(TWI)'],['排气温度(TRD)'],['吸气温度(TRS)'],['蒸发温度(TE)'],['DHW测量温度'],['缓冲水箱温度']]},
-  {title:'⚡ 运行状态',items:[['驱动器运行频率'],['直流风扇转速'],['直流水泵流量'],['EXV1开度'],['EXV2开度'],['母线电压'],['压缩机相电流'],['工作模式'],['机组运行状态'],['能量模式']]},
-  {title:'🔌 开关状态',items:[['四通阀状态'],['高压开关状态'],['低压开关状态'],['流量开关状态'],['热水电加热使能'],['空调电加热'],['底盘加热带'],['驱动器开关状态']]},
-  {title:'📊 能耗实时',items:[['系统实时功率'],['系统实时消耗功率'],['系统实时COP'],['制冷实时功率'],['制热实时功率'],['热水实时功率']]},
-  {title:'💧 压力/水系统',items:[['低压压力'],['高压压力'],['排气压力'],['吸气压力'],['水流压力'],['Z1区域水泵'],['Z2区域水泵'],['Z3区域水泵']]}
+  {title:'⚡ 运行状态',items:[
+    ['驱动器运行频率'],['机组当前运行模式'],['机组运行状态'],['工作模式'],['能量模式'],
+    ['直流风扇转速'],['直流水泵流量'],['EXV1开度'],['EXV2开度'],['稳频状态'],
+    ['压缩机累计运行时间'],['压缩机启停总次数'],['系统故障数量'],['系统在线状态'],
+    ['联机数量'],['联机单元运行状态'],['智能电网模式'],['SG-Ready模式']
+  ]},
+  {title:'🔌 开关状态',items:[
+    ['四通阀状态'],['电磁三通阀'],['进水电磁阀'],['Z2区域混合阀'],['Z3区域混合阀'],
+    ['高压开关状态'],['低压开关状态'],['制冷防冻开关'],['流量开关状态'],['联动开关状态'],['联锁开关状态'],
+    ['热水电加热使能'],['空调电加热'],['辅助电加热状态'],['油温加热区'],['底盘加热带'],
+    ['驱动器开关状态'],['开关状态'],['升频状态'],['降频状态'],['交流风扇使能'],
+    ['Z1区域水泵'],['Z2区域水泵'],['Z3区域水泵'],['回水泵状态'],['Z1开关'],['Z2开关'],['Z3开关'],
+    ['SG-READY使能'],['热水功能显示开关'],['热水功能设置状态']
+  ]},
+  {title:'🌡 温度监测',items:[
+    ['环境温度(TAO)'],['出水温度(TWO)'],['回水温度(TWI)'],['DHW测量温度'],['缓冲水箱温度'],
+    ['排气温度(TRD)'],['吸气温度(TRS)'],['蒸发温度(TE)'],['翅片温度(TRC)'],['板换温度(TRP)'],
+    ['补气入口温度(TRI)'],['送风出口温度(TRO)'],['线圈温度'],['排气饱和温度'],['吸气饱和温度'],
+    ['环境温度补偿传感器'],['PCB板温度'],['IPM温度'],['PFC模块温度']
+  ]},
+  {title:'💧 压力/水系统',items:[
+    ['低压压力'],['高压压力'],['排气压力'],['吸气压力'],['水流压力'],['制冷剂泄漏'],
+    ['流量计'],['机组总产水量'],['机组总回水量'],
+    ['Z1区进水温度'],['Z2区进水温度'],['Z3区进水温度'],['Z1温度'],['Z2温度'],['Z3温度']
+  ]},
+  {title:'🔋 供电与电流',items:[
+    ['电源电压'],['母线电压'],['压缩机相电流'],['交流输入电压'],['交流输入电流']
+  ]},
+  {title:'📊 能耗实时',items:[
+    ['系统实时功率'],['系统实时消耗功率'],['系统实时COP'],['内机实时能耗'],
+    ['制冷实时功率'],['制冷实时消耗功率'],['制冷实时COP'],
+    ['制热实时功率'],['制热实时消耗功率'],['制热实时COP'],
+    ['热水实时功率'],['热水实时消耗功率'],['热水实时COP']
+  ]},
+  {title:'温度设定',collapsible:true,items:[
+    ['热水设定温度'],['加热设定温度'],['Z1所需室温'],['Z2所需室温'],['Z3所需室温']
+  ]},
+  {title:'当日能耗',collapsible:true,items:[
+    ['系统日能量'],['系统日消耗能量'],['系统日COP'],['内机当日能耗'],
+    ['制冷日能量'],['制冷日消耗能量'],['制冷日COP'],
+    ['制热日能量'],['制热日消耗能量'],['制热日COP'],
+    ['热水日能量'],['热水日消耗能量'],['热水日COP']
+  ]},
+  {title:'累计能耗',collapsible:true,items:[
+    ['系统总能量'],['系统总消耗能量'],['系统总COP'],['内机总能耗'],
+    ['制冷总能量'],['制冷总消耗能量'],['制冷总COP'],
+    ['制热总能量'],['制热总消耗能量'],['制热总COP'],
+    ['热水总能量'],['热水总消耗能量'],['热水总COP']
+  ]},
+  {title:'并机能耗',collapsible:true,items:P_Y906['42']
+    .filter(([name])=>name.startsWith('并机'))
+    .map(([name])=>[name])}
 ];
 const DASHBOARD_GROUPS_X7=[
   {title:'⚡ 功率实时',items:[['系统PV总功率'],['系统电网侧总有功功率'],['系统总负载功率'],['EPS口实时功率'],['电池实时功率'],['电池实时SOC'],['系统PV总电能'],['系统电网侧总输入电能']]},
@@ -4721,8 +4768,9 @@ function updateDashboard(parsed){
   if(currentProto!=='X7'){
     const snField=parsed.parsed.find(p=>p.name==='子设备SN');
     const sn=snField?String(snField.value||''):'';
-    if(sn&&activeDashboardSN&&sn!==activeDashboardSN){latestData={};curveBuf=[];}
+    if(sn&&activeDashboardSN&&sn!==activeDashboardSN)curveBuf=[];
     if(sn)activeDashboardSN=sn;
+    latestData={}; // 每条 0x42 都是一次快照，短帧缺少的字段在仪表盘显示为 --。
   }
   for(const p of parsed.parsed){
     latestData[p.name]=p.value+(p.unit?' '+p.unit:'');
@@ -4763,19 +4811,26 @@ function renderDashboard(){
     <div style="font-size:12px;color:#999;">最后更新: ${updated}</div>
   </div>`;
   const groups=currentProto==='X7'?DASHBOARD_GROUPS_X7:DASHBOARD_GROUPS;
+  const openGroups=new Set([...container.querySelectorAll('details[data-dashboard-group][open]')].map(el=>el.dataset.dashboardGroup));
   for(const group of groups){
-    html+=`<div style="margin-bottom:16px;">
-      <div style="font-size:13px;font-weight:600;color:#333;margin-bottom:8px;padding-bottom:4px;border-bottom:2px solid #e0e0e0;">${group.title}</div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">`;
+    const title=escapeHtml(group.title);
+    const headingStyle='font-size:13px;font-weight:600;color:#333;margin-bottom:8px;padding-bottom:4px;border-bottom:2px solid #e0e0e0;';
+    if(group.collapsible){
+      html+=`<details data-dashboard-group="${title}"${openGroups.has(group.title)?' open':''} style="margin-bottom:16px;">
+        <summary style="${headingStyle}cursor:pointer;">${title}</summary>`;
+    }else{
+      html+=`<div style="margin-bottom:16px;"><div style="${headingStyle}">${title}</div>`;
+    }
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">';
     for(const [label] of group.items){
       const val=latestData[label]||'--';
-      const isFault=label.includes('故障')&&val!=='无故障'&&val!=='--';
+      const isFault=label.includes('故障')&&val!=='0'&&val!=='无故障'&&val!=='--';
       html+=`<div style="background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:10px 12px;">
-        <div style="font-size:11px;color:#999;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${label}</div>
+        <div style="font-size:11px;color:#999;margin-bottom:4px;overflow-wrap:anywhere;">${escapeHtml(label)}</div>
         <div style="font-size:16px;font-weight:600;color:${isFault?'#ea4335':'#1a73e8'};">${escapeHtml(val)}</div>
       </div>`;
     }
-    html+=`</div></div>`;
+    html+=group.collapsible?'</div></details>':'</div></div>';
   }
   const faults=[];
   for(const key in latestData){
